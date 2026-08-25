@@ -15,11 +15,11 @@ jobs:
       - name: Checkout Android repository
         uses: actions/checkout@v4
 
-      - name: Checkout Ablect-ERP source
+      - name: Checkout Ablect-ERP source from modern POS branch
         uses: actions/checkout@v4
         with:
           repository: ablect/Ablect-ERP
-          ref: main
+          ref: feat/modern-sales-pos
           path: erp-source
 
       - name: Prepare mobile project
@@ -30,6 +30,21 @@ jobs:
           rm -rf src public electron android package-lock.json package.json tsconfig*.json vite.config.* tailwind.config.* postcss.config.* eslint.config.* components.json
           cp -R erp-source/. .
           rm -rf erp-source .git
+
+          # Replace the desktop-only data bridge with a persistent mobile adapter.
+          cp mobile/mobileApi.ts src/lib/mobileApi.ts
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = 'src/lib/desktopApi.ts';
+          let text = fs.readFileSync(path, 'utf8');
+          text = text.replace(/^type DesktopApi=/m, 'export type DesktopApi=');
+          if (!text.includes('from "./mobileApi"')) {
+            text = 'import { mobileApi } from "./mobileApi";\n' + text;
+          }
+          text = text.replace('export function desktopApi():DesktopApi|null{if(typeof window==="undefined")return null;return window.ablectDesktop as unknown as DesktopApi;}', 'export function desktopApi():DesktopApi|null{if(typeof window==="undefined")return null;return (window.ablectDesktop as unknown as DesktopApi) ?? mobileApi();}');
+          text = text.replace('export function requireDesktopApi():DesktopApi{const api=desktopApi();if(!api)throw new Error("Ablect Desktop bridge is unavailable. Start the ERP through Electron.");return api;}', 'export function requireDesktopApi():DesktopApi{const api=desktopApi();if(!api)throw new Error("Ablect Business Suite could not initialize its local mobile data store.");return api;}');
+          fs.writeFileSync(path, text);
+          NODE
 
           cat > src/mobile.css <<'EOF'
           *, *::before, *::after { box-sizing: border-box; }
