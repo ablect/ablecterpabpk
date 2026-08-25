@@ -1,0 +1,51 @@
+import type { AuthSession, DesktopApi, Permission, SettingRecord, SetupStatus, LicenseStatus, UnitType, PrinterInfo } from "./desktopApi";
+
+type AnyRecord = Record<string, any>;
+type MobileState = {
+  businessName: string; address: string; configured: boolean;
+  users: Array<AnyRecord & { passwordHash: string; permissions: Permission[] }>;
+  products: AnyRecord[]; customers: AnyRecord[]; suppliers: AnyRecord[]; warehouses: AnyRecord[];
+  sales: AnyRecord[]; purchases: AnyRecord[]; stock: AnyRecord[]; opportunities: AnyRecord[]; activities: AnyRecord[];
+  employees: AnyRecord[]; attendance: AnyRecord[]; payrollRuns: AnyRecord[]; settings: SettingRecord[];
+  auditLogs: AnyRecord[]; sessions: Record<string, { userId: string; expiresAt: string }>;
+};
+const KEY="ablect-business-suite-mobile-v1"; const now=()=>new Date().toISOString(); const id=(p:string)=>`${p}_${crypto.randomUUID()}`; const clone=<T>(v:T):T=>JSON.parse(JSON.stringify(v));
+const defaultPermissions=():Permission[]=>["dashboard","sales","products","inventory","purchases","customers","suppliers","warehouse","crm","hr","payroll","reports","settings","users"].map(module=>({module,view:true,create:true,edit:true,delete:true}));
+const read=():MobileState=>{try{const raw=localStorage.getItem(KEY);if(raw)return JSON.parse(raw);}catch{}return{businessName:"Ablect Business Suite",address:"",configured:false,users:[],products:[],customers:[],suppliers:[],warehouses:[],sales:[],purchases:[],stock:[],opportunities:[],activities:[],employees:[],attendance:[],payrollRuns:[],settings:[],auditLogs:[],sessions:{}}};
+let state=read(); const save=()=>localStorage.setItem(KEY,JSON.stringify(state));
+async function hashPassword(password:string){const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(password));return Array.from(new Uint8Array(digest)).map(x=>x.toString(16).padStart(2,"0")).join("");}
+const permissionsFor=(u:AnyRecord):Permission[]=>u.permissions?.length?u.permissions:defaultPermissions(); const publicUser=(u:AnyRecord)=>({id:u.id,name:u.name,email:u.email,role:u.role,roleId:u.roleId??null,permissions:permissionsFor(u)}); const findById=(list:AnyRecord[],v:string)=>list.find(x=>x.id===v||x.uuid===v||x._id===v); const tokenFor=()=>`mobile_${crypto.randomUUID()}`;
+const upsert=(list:AnyRecord[],p:AnyRecord,prefix:string)=>{const item={...p,id:p.id||id(prefix),updatedAt:now(),createdAt:p.createdAt||now()};const i=list.findIndex(x=>x.id===item.id);if(i>=0)list[i]={...list[i],...item};else list.unshift(item);return clone(item);};
+const remove=(list:AnyRecord[],itemId:string)=>{const i=list.findIndex(x=>x.id===itemId);if(i>=0)list.splice(i,1);return{deleted:true,id:itemId};};
+const api:DesktopApi={
+ getClientConfig:async()=>({mode:"mobile",businessName:state.businessName}), getDatabaseStatus:async()=>({connected:true,error:null}),
+ auth:{
+  login:async(identifier,password)=>{const u=state.users.find(x=>x.email.toLowerCase()===identifier.toLowerCase()||x.username?.toLowerCase()===identifier.toLowerCase());if(!u)throw new Error("Account not found.");if(u.status==="Suspended")throw new Error("This account is suspended.");if(await hashPassword(password)!==u.passwordHash)throw new Error("Incorrect password.");const token=tokenFor(),expiresAt=new Date(Date.now()+2592000000).toISOString();state.sessions[token]={userId:u.id,expiresAt};u.lastLogin=now();save();return{token,expiresAt,user:publicUser(u)} as AuthSession;},
+  validate:async(token)=>{const s=state.sessions[token];if(!s||new Date(s.expiresAt)<new Date())return null;const u=findById(state.users,s.userId);return u?publicUser(u):null;},logout:async(token)=>{delete state.sessions[token];save();},
+  changePassword:async(token,currentPassword,newPassword)=>{const s=state.sessions[token],u=s&&findById(state.users,s.userId);if(!u||await hashPassword(currentPassword)!==u.passwordHash)throw new Error("Current password is incorrect.");if(newPassword.length<10)throw new Error("Password must be at least 10 characters.");u.passwordHash=await hashPassword(newPassword);save();return{changed:true};},
+  supportReset:async(token,newPassword)=>{const s=state.sessions[token],u=s&&findById(state.users,s.userId);if(!u)throw new Error("Session expired.");u.passwordHash=await hashPassword(newPassword);save();return{changed:true};}
+ },
+ license:{status:async()=>({valid:true,reason:"Mobile installation"}) as LicenseStatus},
+ setup:{
+  status:async()=>({needsSetup:!state.configured,users:state.users.length,products:state.products.length,hardwareConfigured:Boolean(state.settings.find(x=>x.key==="printer")),businessName:state.businessName}) as SetupStatus,
+  complete:async(p:any)=>{if(state.configured)throw new Error("Initial setup has already been completed.");const email=String(p.email||"").trim().toLowerCase();if(!p.businessName?.trim()||!p.fullName?.trim()||!email||!p.password)throw new Error("Complete all administrator fields.");if(p.password.length<10)throw new Error("Password must be at least 10 characters.");state.businessName=p.businessName.trim();state.address=p.address||"";state.users=[{id:id("usr"),name:p.fullName.trim(),email,role:"Administrator",roleId:"administrator",status:"Active",department:"Management",twoFactor:false,permissions:defaultPermissions(),passwordHash:await hashPassword(p.password),createdAt:now(),lastLogin:null}];state.settings=[{key:"business.profile",value:{businessName:state.businessName,address:state.address},updatedAt:now()},{key:"printer",value:{name:p.printerName||"Xprinter",connection:p.connection||"USB",address:p.address||""},updatedAt:now()}];state.configured=true;save();return{completed:true};}
+ },
+ erp:{
+  products:{list:async(search="")=>clone(state.products.filter(p=>!search||JSON.stringify(p).toLowerCase().includes(search.toLowerCase()))),create:async(p)=>{const x=upsert(state.products,p,"prd");state.stock.unshift({id:id("mov"),type:"opening",productId:x.id,quantity:Number(p.quantity||0),createdAt:now()});save();return x;},update:async(p)=>{const x=upsert(state.products,p,"prd");save();return x;},delete:async(x)=>{const r=remove(state.products,x);save();return r;}},
+  units:{list:async()=>[{id:"pcs",code:"PCS",name:"Pieces",allowsDecimal:false,isActive:true},{id:"kg",code:"KG",name:"Kilogram",allowsDecimal:true,isActive:true},{id:"ltr",code:"LTR",name:"Litre",allowsDecimal:true,isActive:true}] as UnitType[]},
+  customers:{list:async(search="")=>clone(state.customers.filter(c=>!search||JSON.stringify(c).toLowerCase().includes(search.toLowerCase()))),create:async(p)=>{const x=upsert(state.customers,p,"cus");save();return x;},update:async(p)=>{const x=upsert(state.customers,p,"cus");save();return x;},delete:async(x)=>{const r=remove(state.customers,x);save();return r;}},
+  suppliers:{list:async(search="")=>clone(state.suppliers.filter(s=>!search||JSON.stringify(s).toLowerCase().includes(search.toLowerCase()))),create:async(p)=>{const x=upsert(state.suppliers,p,"sup");save();return x;},update:async(p)=>{const x=upsert(state.suppliers,p,"sup");save();return x;}},
+  warehouses:{list:async()=>clone(state.warehouses),create:async(p)=>{const x=upsert(state.warehouses,p,"wh");save();return x;}},
+  dashboard:{metrics:async()=>{const sales=state.sales.reduce((n,s)=>n+Number(s.total??s.grandTotal??0),0);const stockValue=state.products.reduce((n,p)=>n+Number(p.quantity||0)*Number(p.sellingPrice??p.price??0),0);return{salesToday:sales,totalSales:sales,products:state.products.length,customers:state.customers.length,suppliers:state.suppliers.length,stockValue,lowStock:state.products.filter(p=>Number(p.quantity||0)<=Number(p.reorderLevel||5)).length};}},
+  sales:{create:async(p)=>{const x=upsert(state.sales,{...p,total:Number(p.total??p.grandTotal??0),status:p.status||"Completed"},"sale");(p.items||[]).forEach((l:any)=>{const product=findById(state.products,l.productId||l.id);if(product)product.quantity=Math.max(0,Number(product.quantity||0)-Number(l.quantity||1));});save();return x;},list:async()=>clone(state.sales)},
+  purchases:{create:async(p)=>{const x=upsert(state.purchases,{...p,status:p.status||"Pending"},"pur");save();return x;},receive:async(p)=>{const x=upsert(state.purchases,{...p,status:"Received",receivedAt:now()},"pur");(p.items||[]).forEach((l:any)=>{const product=findById(state.products,l.productId||l.id);if(product)product.quantity=Number(product.quantity||0)+Number(l.quantity||0);});save();return x;},list:async()=>clone(state.purchases)},
+  stock:{transfer:async(p)=>{const x=upsert(state.stock,{...p,type:"transfer"},"mov");save();return x;},movements:async()=>clone(state.stock),reserve:async(p)=>{const x=upsert(state.stock,{...p,type:"reserve"},"mov");save();return x;},release:async(p)=>{const x=upsert(state.stock,{...p,type:"release"},"mov");save();return x;}},
+  crm:{opportunities:async()=>clone(state.opportunities),activities:async()=>clone(state.activities)}, hr:{employees:async()=>clone(state.employees),attendance:async()=>clone(state.attendance)},
+  payroll:{runs:async()=>clone(state.payrollRuns),calculate:async(p)=>({id:id("pay"),...p,calculatedAt:now(),netPay:Number(p.basicSalary||0)-Number(p.tax||0)-Number(p.pension||0)})},
+  admin:{users:async()=>clone(state.users.map(publicUser)),roles:async()=>[],auditLogs:async()=>clone(state.auditLogs)},
+  reports:{summary:async(from,to)=>({from,to,sales:clone(state.sales),purchases:clone(state.purchases),products:clone(state.products),customers:clone(state.customers),generatedAt:now()})}
+ },
+ settings:{all:async()=>clone(state.settings),get:async(key)=>clone(state.settings.find(x=>x.key===key)||null),save:async(key,value)=>{const item={key,value,updatedAt:now()};const i=state.settings.findIndex(x=>x.key===key);if(i>=0)state.settings[i]=item;else state.settings.push(item);save();return clone(item);}},
+ hardware:{printers:{list:async()=>{const p=state.settings.find(x=>x.key==="printer");return p?[{name:String((p.value as any).name||"Xprinter"),displayName:"Xprinter",description:"Mobile print profile",status:0,isDefault:true}] as PrinterInfo[]:[];}},receipt:{print:async(payload)=>({printed:false,queued:true,payload}),pdf:async(payload)=>({generated:false,unsupportedOnMobile:true,payload})}}
+};
+export function mobileApi():DesktopApi{return api;}
