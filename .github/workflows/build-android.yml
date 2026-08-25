@@ -1,0 +1,106 @@
+name: Build Ablect Business Suite APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Android repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Ablect-ERP source
+        uses: actions/checkout@v4
+        with:
+          repository: ablect/Ablect-ERP
+          ref: main
+          path: erp-source
+
+      - name: Prepare mobile project
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s dotglob
+          rm -rf src public electron android package-lock.json package.json tsconfig*.json vite.config.* tailwind.config.* postcss.config.* eslint.config.* components.json
+          cp -R erp-source/. .
+          rm -rf erp-source .git
+
+          cat > src/mobile.css <<'EOF'
+          /* Ablect Business Suite mobile touch/responsive layer */
+          *, *::before, *::after { box-sizing: border-box; }
+          html, body, #root { width: 100%; min-height: 100%; margin: 0; }
+          html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+          body { overflow-x: hidden; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+          button, [role="button"], input, select, textarea { font: inherit; }
+          button, [role="button"] { min-height: 44px; }
+          input, select, textarea { min-height: 44px; max-width: 100%; }
+          img, svg { max-width: 100%; }
+          table { max-width: 100%; }
+          @media (max-width: 900px) {
+            main, section, article { max-width: 100%; }
+            .overflow-x-auto, [class*="overflow-x-auto"] { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            table { min-width: max-content; }
+          }
+          @media (max-width: 640px) {
+            body { font-size: 14px; }
+            button, [role="button"] { min-width: 44px; }
+            input, select, textarea { width: 100%; }
+            dialog, [role="dialog"] { max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); overflow: auto; }
+          }
+          @media (orientation: landscape) and (max-height: 520px) {
+            body { font-size: 13px; }
+          }
+          EOF
+
+          if ! grep -q '"./mobile.css"' src/main.tsx; then
+            sed -i '1i import "./mobile.css";' src/main.tsx
+          fi
+
+          node -e "let p=require('./package.json'); p.name='ablect-business-suite-mobile'; p.private=true; p.scripts={...p.scripts, build:'tsc -b && vite build'}; require('fs').writeFileSync('package.json', JSON.stringify(p,null,2)+'\\n')"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install web dependencies
+        run: npm install
+
+      - name: Install Capacitor
+        run: npm install @capacitor/core @capacitor/android && npm install --save-dev @capacitor/cli
+
+      - name: Build web application
+        run: npm run build
+
+      - name: Configure Capacitor
+        run: |
+          npx cap init "Ablect Business Suite" "com.ablect.businesssuite" --web-dir dist
+          npx cap add android
+          npx cap sync android
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ablect-business-suite-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
