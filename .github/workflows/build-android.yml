@@ -76,8 +76,8 @@ jobs:
             delete p.devDependencies['vite-plugin-electron'];
             delete p.devDependencies['vite-plugin-electron-renderer'];
           }
-          p.scripts = { ...p.scripts, build: 'tsc -b && vite build' };
-          fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\\n');
+          p.scripts = { ...p.scripts, build: 'vite build' };
+          fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
           NODE
 
       - name: Setup Node.js
